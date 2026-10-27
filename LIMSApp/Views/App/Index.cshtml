@@ -1,0 +1,156 @@
+﻿@{
+    ViewData["Title"] = "Podgląd z kamery";
+}
+
+<style>
+    .cam-wrap { max-width: 960px; margin: 0 auto; }
+    .cam-tabs { display: flex; gap: .5rem; margin-bottom: 1rem; }
+    .cam-tabs button {
+        padding: .5rem 1rem; border: 1px solid #888; background: transparent;
+        border-radius: 6px; cursor: pointer; font: inherit; color: inherit;
+    }
+    .cam-tabs button[aria-selected="true"] { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    .cam-tabs button:focus-visible { outline: 3px solid #f0b429; outline-offset: 2px; }
+    .cam-frame {
+        position: relative; aspect-ratio: 16 / 9; background: #111; border-radius: 8px; overflow: hidden;
+    }
+    .cam-frame video, .cam-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .cam-status { margin-top: .75rem; min-height: 1.5rem; }
+    .cam-controls { display: flex; gap: .5rem; align-items: center; margin: .75rem 0; flex-wrap: wrap; }
+    [hidden] { display: none !important; }
+</style>
+
+<div class="cam-wrap">
+    <h1>@ViewBag.Name</h1>
+
+    <div class="cam-tabs" role="tablist">
+        <button role="tab" id="tab-local" aria-selected="true" aria-controls="panel-local">Kamera tego urządzenia</button>
+        <button role="tab" id="tab-ip" aria-selected="false" aria-controls="panel-ip">Kamera sieciowa (WiFi / Ethernet)</button>
+    </div>
+
+    @* ---------- 1) Kamera laptopa / USB (getUserMedia) ---------- *@
+    <section id="panel-local" role="tabpanel" aria-labelledby="tab-local">
+        <div class="cam-controls">
+            <label for="deviceSelect">Kamera:</label>
+            <select id="deviceSelect"></select>
+            <button id="btnStart" type="button">Włącz</button>
+            <button id="btnStop" type="button" disabled>Wyłącz</button>
+        </div>
+        <div class="cam-frame">
+            <video id="localVideo" autoplay playsinline muted></video>
+        </div>
+    </section>
+
+    @* ---------- 2) Kamera IP (MJPEG przez kontroler-proxy) ---------- *@
+    <section id="panel-ip" role="tabpanel" aria-labelledby="tab-ip" hidden>
+        <div class="cam-controls">
+            <button id="btnIpStart" type="button">Połącz z kamerą</button>
+            <button id="btnIpStop" type="button" disabled>Rozłącz</button>
+        </div>
+        <div class="cam-frame">
+            <img id="ipImage" alt="Obraz z kamery sieciowej" />
+        </div>
+    </section>
+
+    <p id="status" class="cam-status" role="status" aria-live="polite"></p>
+</div>
+
+@section Scripts {
+    <script>
+        (() => {
+            const $ = id => document.getElementById(id);
+            const status = msg => $("status").textContent = msg;
+
+            // ---------- Zakładki ----------
+            const tabs = { local: [$("tab-local"), $("panel-local")], ip: [$("tab-ip"), $("panel-ip")] };
+            function showTab(name) {
+                for (const [key, [tab, panel]] of Object.entries(tabs)) {
+                    tab.setAttribute("aria-selected", key === name);
+                    panel.hidden = key !== name;
+                }
+                if (name !== "local") stopLocal();
+                if (name !== "ip") stopIp();
+                status("");
+            }
+            $("tab-local").onclick = () => showTab("local");
+            $("tab-ip").onclick = () => showTab("ip");
+
+            // ---------- Kamera lokalna ----------
+            let stream = null;
+
+            async function listCameras() {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const select = $("deviceSelect");
+                select.innerHTML = "";
+                devices.filter(d => d.kind === "videoinput").forEach((d, i) => {
+                    const opt = document.createElement("option");
+                    opt.value = d.deviceId;
+                    opt.textContent = d.label || `Kamera ${i + 1}`;
+                    select.appendChild(opt);
+                });
+            }
+
+            async function startLocal() {
+                if (!navigator.mediaDevices?.getUserMedia) {
+                    status("Ta przeglądarka nie obsługuje dostępu do kamery. Otwórz stronę przez HTTPS lub localhost.");
+                    return;
+                }
+                stopLocal();
+                try {
+                    const deviceId = $("deviceSelect").value;
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: deviceId ? { deviceId: { exact: deviceId } } : true,
+                        audio: false
+                    });
+                    $("localVideo").srcObject = stream;
+                    $("btnStart").disabled = true;
+                    $("btnStop").disabled = false;
+                    await listCameras(); // po zgodzie użytkownika pojawiają się nazwy kamer
+                    status("Kamera działa.");
+                } catch (err) {
+                    const reasons = {
+                        NotAllowedError: "Brak zgody na użycie kamery. Zezwól na dostęp w ustawieniach przeglądarki.",
+                        NotFoundError: "Nie znaleziono kamery.",
+                        NotReadableError: "Kamera jest używana przez inną aplikację."
+                    };
+                    status(reasons[err.name] ?? `Błąd: ${err.message}`);
+                }
+            }
+
+            function stopLocal() {
+                stream?.getTracks().forEach(t => t.stop());
+                stream = null;
+                $("localVideo").srcObject = null;
+                $("btnStart").disabled = false;
+                $("btnStop").disabled = true;
+            }
+
+            $("btnStart").onclick = startLocal;
+            $("btnStop").onclick = () => { stopLocal(); status("Kamera wyłączona."); };
+
+            // ---------- Kamera sieciowa ----------
+            const img = $("ipImage");
+
+            function startIp() {
+                // Parametr t omija cache; strumień idzie przez nasz kontroler
+                img.src = "@Url.Action("Stream", "App")?t=" + Date.now();
+                $("btnIpStart").disabled = true;
+                $("btnIpStop").disabled = false;
+                status("Łączenie z kamerą…");
+            }
+
+            function stopIp() {
+                img.removeAttribute("src"); // zamyka połączenie z serwerem
+                $("btnIpStart").disabled = false;
+                $("btnIpStop").disabled = true;
+            }
+
+            img.onload = () => status("Połączono z kamerą sieciową.");
+            img.onerror = () => { stopIp(); status("Nie udało się połączyć z kamerą. Sprawdź adres i dane logowania w appsettings.json."); };
+            $("btnIpStart").onclick = startIp;
+            $("btnIpStop").onclick = () => { stopIp(); status("Rozłączono."); };
+
+            listCameras().catch(() => {});
+        })();
+    </script>
+}
